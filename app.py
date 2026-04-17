@@ -1,87 +1,59 @@
 import streamlit as st
 import pdfplumber
-import google.generativeai as genai
-import json
 import re
 from io import BytesIO
 import zipfile
+from huggingface_hub import InferenceClient
 
-st.set_page_config(page_title="Renommage Factures", page_icon="📄")
+st.set_page_config(page_title="Renommage Final", page_icon="📄")
 
-# --- CONNEXION ---
-def init_ai():
-    if "GEMINI_API_KEY" not in st.secrets:
-        st.error("Clé API manquante dans les Secrets.")
-        return None
+# Utilisation d'un modèle d'IA gratuit et public (Mistral)
+# Pas besoin de configuration complexe de projet Google ici
+client = InferenceClient("mistralai/Mistral-7B-Instruct-v0.3")
+
+def get_info_ia(text):
+    prompt = f"Extract from this invoice text: 1. Vendor name (short) 2. Invoice number. Answer ONLY in JSON: {{\"vendor\": \"...\", \"number\": \"...\"}}. Text: {text[:1500]}"
     try:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        # On utilise le modèle Flash qui est le plus rapide et robuste
-        return genai.GenerativeModel('gemini-1.5-flash')
-    except Exception as e:
-        st.error(f"Erreur d'initialisation : {e}")
-        return None
-
-model = init_ai()
-
-def get_data_with_ai(text):
-    if not model: return "CONFIG", "ERROR"
-    
-    prompt = (
-        "Tu es un robot qui extrait des données. Analyse ce texte et réponds "
-        "UNIQUEMENT avec un JSON : {'fournisseur': 'NOM_COURT', 'numero': 'NUMERO'}. "
-        f"Texte : {text[:2500]}"
-    )
-    
-    try:
-        response = model.generate_content(prompt)
-        # Nettoyage pour isoler le JSON
-        match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        response = client.text_generation(prompt, max_new_tokens=100)
+        # Extraction du JSON
+        match = re.search(r'\{.*\}', response, re.DOTALL)
         if match:
-            # On s'assure que les guillemets sont corrects pour le JSON
-            clean_json = match.group().replace("'", '"')
-            data = json.loads(clean_json)
-            return data.get('fournisseur', 'INCONNU'), data.get('numero', 'NUM')
-        return "FORMAT", "ERROR"
-    except Exception as e:
-        # On affiche le code d'erreur dans le nom pour comprendre (ex: 403, 429)
-        return "ERREUR_IA", str(e)[:10]
+            import json
+            data = json.loads(match.group().replace("'", '"'))
+            return data.get('vendor', 'INCONNU'), data.get('number', 'NUM')
+    except:
+        return None, None
+    return "INCONNU", "NUM"
 
-# --- INTERFACE ---
-st.title("📂 Renommage de Factures")
+st.title("📂 Renommage de Factures (Version Stable)")
 
-if model:
-    files = st.file_uploader("Déposez vos PDF", type="pdf", accept_multiple_files=True)
+files = st.file_uploader("Déposez vos PDF", type="pdf", accept_multiple_files=True)
 
-    if files:
-        final_files = {}
-        for f in files:
-            with st.spinner(f"Analyse de {f.name}..."):
-                try:
-                    with pdfplumber.open(f) as pdf:
-                        txt = pdf.pages[0].extract_text() or ""
-                    
-                    vendor, num = get_data_with_ai(txt)
-                    
-                    # Nettoyage strict des caractères
-                    v = re.sub(r'[^\w]', '_', str(vendor)).upper().strip('_')
-                    n = re.sub(r'[^\w\-]', '_', str(num)).upper().strip('_')
-                    new_name = f"{v}_FAC_{n}.pdf"
-                    
-                    # Doublons
-                    base = new_name.replace(".pdf", "")
-                    count = 1
-                    while new_name in final_files:
-                        new_name = f"{base}_{count}.pdf"
-                        count += 1
-                        
-                    final_files[new_name] = f.getvalue()
-                    st.write(f"✅ {new_name}")
-                except Exception as e:
-                    st.error(f"Erreur : {e}")
+if files:
+    final_files = {}
+    for f in files:
+        with st.spinner(f"Analyse de {f.name}..."):
+            with pdfplumber.open(f) as pdf:
+                txt = pdf.pages[0].extract_text() or ""
+            
+            # Si l'IA échoue, on utilise une méthode de secours par texte
+            vendor, num = get_info_ia(txt)
+            
+            if not vendor or vendor == "INCONNU":
+                # Secours : on prend la première ligne du texte si l'IA rate
+                lines = [l for l in txt.split('\n') if len(l.strip()) > 2]
+                vendor = lines[0][:15] if lines else "FOURNISSEUR"
 
-        if final_files:
-            buf = BytesIO()
-            with zipfile.ZipFile(buf, "w") as zf:
-                for name, data in final_files.items():
-                    zf.writestr(name, data)
-            st.download_button("📥 Télécharger ZIP", buf.getvalue(), "factures.zip")
+            v = re.sub(r'[^\w]', '_', str(vendor)).upper().strip('_')
+            n = re.sub(r'[^\w\-]', '_', str(num)).upper().strip('_')
+            new_name = f"{v}_FAC_{n}.pdf"
+            
+            final_files[new_name] = f.getvalue()
+            st.write(f"✅ {new_name}")
+
+    if final_files:
+        buf = BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, data in final_files.items():
+                zf.writestr(name, data)
+        st.download_button("📥 Télécharger ZIP", buf.getvalue(), "factures.zip")
